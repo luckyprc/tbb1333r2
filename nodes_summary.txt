@@ -1,0 +1,4 @@
+Total fetched: 2
+Unique: 1
+Valid (delay <= 600ms): 0
+
