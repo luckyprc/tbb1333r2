@@ -33,7 +33,7 @@ jobs:
 
           TIMEOUT_TCP = 2      # 死节点 2 秒放弃
           TIMEOUT_HTTP = 3   # HTTP 测试 3 秒放弃
-          MAX_DELAY_MS = 5000
+          MAX_DELAY_MS = 1000
           CONCURRENCY = 500   # 提高并发
 
           def fetch_source(url):
