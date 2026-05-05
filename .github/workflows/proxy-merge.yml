@@ -33,18 +33,26 @@ jobs:
 
           TIMEOUT_TCP = 5
           TIMEOUT_HTTP = 8
-          MAX_DELAY_MS = 600
+          MAX_DELAY_MS = 3000
 
           def fetch_source(url):
               try:
                   req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
                   with urllib.request.urlopen(req, timeout=30) as resp:
                       data = resp.read()
+                      raw_preview = data[:200].decode("utf-8", errors="ignore").replace("\n", "\\n")
+                      print(f"[RAW] {url} | length={len(data)} | preview={raw_preview}")
                       try:
                           text = base64.b64decode(data).decode("utf-8", errors="ignore")
+                          print(f"[DECODE] Base64 decoded ok, length={len(text)}")
                       except Exception:
                           text = data.decode("utf-8", errors="ignore")
-                      return [line.strip() for line in text.splitlines() if line.strip()]
+                          print(f"[DECODE] Plain text, length={len(text)}")
+                      lines = [line.strip() for line in text.splitlines() if line.strip()]
+                      print(f"[FETCH] {url} -> {len(lines)} nodes")
+                      if lines:
+                          print(f"[SAMPLE] First node: {lines[0][:120]}")
+                      return lines
               except Exception as e:
                   print(f"[ERROR] Fetch failed {url}: {e}")
                   return []
@@ -68,32 +76,6 @@ jobs:
                       if ":" in after_at:
                           host, port_str = after_at.rsplit(":", 1)
                           return (host, int(port_str))
-                  elif node.startswith("ssr://"):
-                      body = node[6:]
-                      try:
-                          decoded = base64.b64decode(body + "=" * (4 - len(body) % 4)).decode("utf-8", errors="ignore")
-                      except Exception:
-                          return None
-                      parts = decoded.split(":")
-                      if len(parts) >= 2:
-                          host = parts[0]
-                          try:
-                              port = int(parts[1])
-                              return (host, port)
-                          except ValueError:
-                              return None
-                  elif node.startswith("vmess://"):
-                      body = node[8:]
-                      try:
-                          decoded = base64.b64decode(body + "=" * (4 - len(body) % 4)).decode("utf-8", errors="ignore")
-                          import json
-                          obj = json.loads(decoded)
-                          host = obj.get("add", "")
-                          port = int(obj.get("port", 0))
-                          if host and port:
-                              return (host, port)
-                      except Exception:
-                          return None
                   elif node.startswith("trojan://"):
                       body = node[9:]
                       if "@" in body:
@@ -102,7 +84,8 @@ jobs:
                           if ":" in after_at:
                               host, port_str = after_at.rsplit(":", 1)
                               return (host, int(port_str))
-              except Exception:
+              except Exception as e:
+                  print(f"[PARSE ERROR] {node[:80]}... -> {e}")
                   pass
               return None
 
@@ -115,7 +98,7 @@ jobs:
                   writer.close()
                   await writer.wait_closed()
                   return int((time.time() - start) * 1000)
-              except Exception:
+              except Exception as e:
                   return None
 
           def parse_status_code(data):
@@ -159,7 +142,6 @@ jobs:
                       status_code = parse_status_code(data)
                       if status_code is None:
                           return None
-                      # 放宽：只要收到有效的HTTP响应（任何状态码100-599）即保留
                       if not (100 <= status_code <= 599):
                           print(f"[STATUS INVALID] {test_host}:{test_port} -> {status_code}")
                           return None
@@ -184,8 +166,12 @@ jobs:
 
           async def process_node(node, semaphore):
               async with semaphore:
+                  # 只保留 SS 和 Trojan
+                  if not (node.startswith("ss://") or node.startswith("trojan://")):
+                      return None
                   parsed = parse_node_url(node)
                   if not parsed:
+                      print(f"[PARSE FAIL] {node[:80]}...")
                       return None
                   host, port = parsed
                   tcp_delay = await tcp_test(host, port)
@@ -208,7 +194,6 @@ jobs:
               all_nodes = []
               for url in SOURCES:
                   nodes = fetch_source(url)
-                  print(f"[FETCH] {url} -> {len(nodes)} nodes")
                   all_nodes.extend(nodes)
 
               seen = set()
