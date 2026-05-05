@@ -27,7 +27,7 @@ jobs:
           import time
           import urllib.request
           from datetime import datetime, timedelta
-          import pytz
+          from zoneinfo import ZoneInfo
 
           # ---------- 配置 ----------
           TIMEOUT_TCP = 2      # TCP 超时 2 秒
@@ -42,8 +42,7 @@ jobs:
           # ---------- 动态获取源列表 ----------
           def get_source_urls():
               """通过 GitHub API 获取 uploads 目录下当天所有 .txt 文件"""
-              beijing = pytz.timezone('Asia/Shanghai')
-              now = datetime.now(beijing)
+              now = datetime.now(ZoneInfo('Asia/Shanghai'))
 
               def build_urls(dt):
                   date_str = dt.strftime('%Y%m%d')
