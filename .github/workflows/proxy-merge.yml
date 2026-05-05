@@ -33,7 +33,7 @@ jobs:
 
           TIMEOUT_TCP = 5
           TIMEOUT_HTTP = 8
-          MAX_DELAY_MS = 3000
+          MAX_DELAY_MS = 800
 
           def fetch_source(url):
               try:
