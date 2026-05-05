@@ -1,4 +1,4 @@
 Total fetched: 2
 Unique: 1
-Valid (delay <= 600ms): 0
+Valid (delay <= 3000ms): 0
 
