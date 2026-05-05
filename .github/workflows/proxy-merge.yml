@@ -22,38 +22,105 @@ jobs:
           cat << 'PYEOF' > merge_test.py
           import asyncio
           import base64
+          import json
           import ssl
           import time
           import urllib.request
+          from datetime import datetime, timedelta
+          import pytz
 
-          SOURCES = [
-              "https://ghproxy.net/https://raw.githubusercontent.com/mahdibland/ShadowsocksAggregator/master/sub/sub_merge.txt",
-              "https://raw.githubusercontent.com/mahdibland/ShadowsocksAggregator/master/sub/sub_merge.txt",
-          ]
+          # ---------- 配置 ----------
+          TIMEOUT_TCP = 2      # TCP 超时 2 秒
+          TIMEOUT_HTTP = 8     # HTTP 测试超时 8 秒
+          MAX_DELAY_MS = 3000  # 延迟限制 3000ms
+          CONCURRENCY = 500    # 并发限制 500
+          FALLBACK_RETRIES = 1 # fallback 重试 1 次
 
-          TIMEOUT_TCP = 2      # 死节点 2 秒放弃
-          TIMEOUT_HTTP = 3   # HTTP 测试 3 秒放弃
-          MAX_DELAY_MS = 260
-          CONCURRENCY = 500   # 提高并发
+          PROTOCOL_PREFIXES = ("ss://", "trojan://", "vmess://", "socks://", "socks5://", "ssr://")
+          TESTABLE_PREFIXES = ("ss://", "trojan://", "socks://", "socks5://", "ssr://")  # 去掉 vmess://
 
+          # ---------- 动态获取源列表 ----------
+          def get_source_urls():
+              """通过 GitHub API 获取 uploads 目录下当天所有 .txt 文件"""
+              beijing = pytz.timezone('Asia/Shanghai')
+              now = datetime.now(beijing)
+
+              def build_urls(dt):
+                  date_str = dt.strftime('%Y%m%d')
+                  year = dt.strftime('%Y')
+                  month = dt.strftime('%m')
+                  api_url = f"https://api.github.com/repos/hiddifynextnode/hiddifynextnode.github.io/contents/uploads/{year}/{month}"
+
+                  urls = []
+                  try:
+                      req = urllib.request.Request(api_url, headers={
+                          "User-Agent": "Mozilla/5.0",
+                          "Accept": "application/vnd.github+json"
+                      })
+                      with urllib.request.urlopen(req, timeout=30) as resp:
+                          data = json.loads(resp.read().decode('utf-8'))
+                          for item in data:
+                              if item.get('type') == 'file' and item.get('name', '').endswith('.txt'):
+                                  name = item['name']
+                                  if date_str in name:
+                                      urls.append(item['download_url'])
+                          print(f"[API] {year}/{month} | Found {len(urls)} txt files for {date_str}")
+                  except Exception as e:
+                      print(f"[WARN] GitHub API failed for {year}/{month}: {e}")
+
+                  # API 失败或当天无文件时，用固定规律回退
+                  if not urls:
+                      for i in range(5):
+                          urls.append(
+                              f"https://raw.githubusercontent.com/hiddifynextnode/hiddifynextnode.github.io/main/uploads/{year}/{month}/{i}-{date_str}.txt"
+                          )
+                      print(f"[FALLBACK] {year}/{month} | Using fixed pattern for {date_str}")
+
+                  return urls
+
+              # 先尝试当天
+              urls = build_urls(now)
+              if urls:
+                  return urls
+
+              # 当天无结果，回退到前一天（自动处理跨月、跨年）
+              prev = now - timedelta(days=1)
+              print(f"[ROLLBACK] No files for today, trying previous day {prev.strftime('%Y%m%d')}")
+              return build_urls(prev)
+
+          # ---------- 获取源内容 ----------
           def fetch_source(url):
               try:
                   req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
                   with urllib.request.urlopen(req, timeout=30) as resp:
-                      data = resp.read()
-                      text = data.decode("utf-8", errors="ignore")
-                      if not ("ss://" in text or "trojan://" in text):
-                          try:
-                              text = base64.b64decode(data).decode("utf-8", errors="ignore")
-                          except Exception:
-                              pass
-                      lines = [line.strip() for line in text.splitlines() if line.strip()]
-                      print(f"[FETCH] {url} -> {len(lines)} nodes")
-                      return lines
+                      raw = resp.read()
+                      try:
+                          text = raw.decode("utf-8", errors="strict")
+                      except Exception:
+                          text = raw.decode("utf-8", errors="ignore")
+
+                      has_protocol = any(prefix in text for prefix in PROTOCOL_PREFIXES)
+
+                      if has_protocol:
+                          lines = [line.strip() for line in text.splitlines() if line.strip()]
+                          print(f"[FETCH] {url} -> {len(lines)} nodes (plaintext)")
+                          return lines
+
+                      try:
+                          decoded = base64.b64decode(raw).decode("utf-8", errors="ignore")
+                          lines = [line.strip() for line in decoded.splitlines() if line.strip()]
+                          print(f"[FETCH] {url} -> {len(lines)} nodes (base64 decoded)")
+                          return lines
+                      except Exception:
+                          pass
+
+                      print(f"[FETCH] {url} -> 0 nodes (unrecognized format)")
+                      return []
               except Exception as e:
                   print(f"[ERROR] Fetch failed {url}: {e}")
                   return []
 
+          # ---------- 解析节点 URL ----------
           def parse_node_url(node):
               try:
                   if node.startswith("ss://"):
@@ -73,6 +140,7 @@ jobs:
                       if ":" in after_at:
                           host, port_str = after_at.rsplit(":", 1)
                           return (host, int(port_str))
+
                   elif node.startswith("trojan://"):
                       body = node[9:]
                       if "@" in body:
@@ -81,10 +149,38 @@ jobs:
                           if ":" in after_at:
                               host, port_str = after_at.rsplit(":", 1)
                               return (host, int(port_str))
+
+                  elif node.startswith("socks://") or node.startswith("socks5://"):
+                      if node.startswith("socks5://"):
+                          body = node[9:]
+                      else:
+                          body = node[8:]
+                      body = body.split("#")[0].split("?")[0]
+                      if "@" in body:
+                          _, after_at = body.split("@", 1)
+                          body = after_at
+                      if ":" in body:
+                          host, port_str = body.rsplit(":", 1)
+                          if host.startswith("["):
+                              host = host[1:-1]
+                          return (host, int(port_str))
+
+                  elif node.startswith("ssr://"):
+                      body = node[6:]
+                      try:
+                          decoded = base64.b64decode(body).decode("utf-8", errors="ignore")
+                          parts = decoded.split(":")
+                          if len(parts) >= 2:
+                              host = parts[0]
+                              port_str = parts[1]
+                              return (host, int(port_str))
+                      except Exception:
+                          pass
               except Exception:
                   pass
               return None
 
+          # ---------- TCP 测试 ----------
           async def tcp_test(host, port):
               try:
                   start = time.time()
@@ -97,6 +193,7 @@ jobs:
               except Exception:
                   return None
 
+          # ---------- HTTP 测试（带 fallback） ----------
           def parse_status_code(data):
               try:
                   first_line = data.split(b"\r\n")[0].decode("utf-8", errors="ignore")
@@ -107,8 +204,7 @@ jobs:
                   pass
               return None
 
-          async def url_test(host, port):
-              """极简 HTTP 测试：443/8443 走 HTTPS，其余走 HTTP，无 fallback"""
+          async def _url_test_once(host, port):
               try:
                   start = time.time()
                   use_ssl = port in (443, 8443)
@@ -142,9 +238,23 @@ jobs:
               except Exception:
                   return None
 
+          async def url_test(host, port):
+              delay = await _url_test_once(host, port)
+              if delay is not None:
+                  return delay
+              for _ in range(FALLBACK_RETRIES):
+                  await asyncio.sleep(0.5)
+                  delay = await _url_test_once(host, port)
+                  if delay is not None:
+                      return delay
+              return None
+
+          # ---------- 处理单个节点 ----------
           async def process_node(node, semaphore):
               async with semaphore:
-                  if not (node.startswith("ss://") or node.startswith("trojan://")):
+                  if node.startswith("vmess://"):
+                      return None
+                  if not any(node.startswith(p) for p in TESTABLE_PREFIXES):
                       return None
                   parsed = parse_node_url(node)
                   if not parsed:
@@ -159,14 +269,22 @@ jobs:
                   if url_delay is None:
                       return None
 
-                  delay = url_delay
-                  if delay > MAX_DELAY_MS:
+                  if url_delay > MAX_DELAY_MS:
                       return None
-                  return {"node": node, "delay": delay, "host": host, "port": port}
+                  return {"node": node, "delay": url_delay, "host": host, "port": port}
 
+          # ---------- 主函数 ----------
           async def main():
-              # 并行拉取两个源
-              fetch_tasks = [asyncio.to_thread(fetch_source, url) for url in SOURCES]
+              sources = get_source_urls()
+              if not sources:
+                  print("[FATAL] No source URLs found")
+                  return
+
+              print(f"[SOURCES] {len(sources)} URLs to fetch")
+              for u in sources:
+                  print(f"  {u}")
+
+              fetch_tasks = [asyncio.to_thread(fetch_source, url) for url in sources]
               all_results = await asyncio.gather(*fetch_tasks)
               all_nodes = []
               for nodes in all_results:
@@ -182,12 +300,13 @@ jobs:
               valid = [r for r in results if r is not None]
               valid.sort(key=lambda x: x["delay"])
 
-              print(f"[VALID] {len(valid)} nodes after filtering")
+              print(f"[VALID] {len(valid)} nodes after filtering (delay <= {MAX_DELAY_MS}ms)")
 
               with open("nodes.txt", "w", encoding="utf-8") as f:
                   f.write("\n".join([r["node"] for r in valid]))
 
               with open("nodes_summary.txt", "w", encoding="utf-8") as f:
+                  f.write(f"Sources fetched: {len(sources)}\n")
                   f.write(f"Total fetched: {len(all_nodes)}\n")
                   f.write(f"Unique: {len(unique_nodes)}\n")
                   f.write(f"Valid (delay <= {MAX_DELAY_MS}ms): {len(valid)}\n\n")
